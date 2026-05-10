@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mountain Dash</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=Share+Tech+Mono&display=swap');
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#0a0e1a; display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:100vh; font-family:'Share Tech Mono', monospace; overflow:hidden; }
+  #wrapper { position:relative; width:700px; height:560px; }
+  canvas { display:block; border-radius:12px; box-shadow:0 0 40px rgba(34,197,94,0.3), 0 0 80px rgba(0,0,0,0.8); }
+  #overlay { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; border-radius:12px; background:rgba(5,8,20,0.82); backdrop-filter:blur(2px); }
+  #card { background:linear-gradient(160deg,#0d1525,#111b30); border:1px solid rgba(34,197,94,0.4); border-radius:16px; padding:36px 48px; text-align:center; max-width:380px; box-shadow:0 0 60px rgba(34,197,94,0.15); }
+  #card h1 { font-family:'Orbitron',sans-serif; font-size:30px; font-weight:900; color:#22c55e; letter-spacing:4px; margin-bottom:4px; text-shadow:0 0 20px rgba(34,197,94,0.6); }
+  #card .sub { font-size:11px; color:#64748b; letter-spacing:3px; margin-bottom:22px; text-transform:uppercase; }
+  #card .rules { font-size:12px; color:#94a3b8; line-height:2; margin-bottom:24px; }
+  #card .rules span { color:#22c55e; }
+  #startBtn { background:transparent; border:1.5px solid #22c55e; color:#22c55e; font-family:'Orbitron',sans-serif; font-size:13px; font-weight:700; letter-spacing:3px; padding:12px 36px; border-radius:8px; cursor:pointer; transition:all 0.2s; text-transform:uppercase; }
+  #startBtn:hover { background:#22c55e; color:#0a0e1a; box-shadow:0 0 24px rgba(34,197,94,0.5); }
+  #hud { position:absolute; top:12px; left:0; width:100%; display:flex; justify-content:space-between; padding:0 14px; pointer-events:none; }
+  .hbox { background:rgba(5,10,25,0.75); border:1px solid rgba(34,197,94,0.25); border-radius:8px; padding:7px 14px; }
+  .hlabel { font-size:9px; letter-spacing:2px; color:#475569; text-transform:uppercase; }
+  .hval { font-family:'Orbitron',sans-serif; font-size:20px; font-weight:700; color:#22c55e; line-height:1.1; }
+  .hval.danger { color:#ef4444; }
+  .hval.warn { color:#f59e0b; }
+  #controls { margin-top:14px; font-size:11px; color:#334155; letter-spacing:1px; text-align:center; }
+  #controls span { color:#22c55e; }
+</style>
+</head>
+<body>
+<div id="wrapper">
+  <canvas id="c" width="700" height="560"></canvas>
+  <div id="hud">
+    <div class="hbox"><div class="hlabel">time</div><div class="hval" id="hTime">60.0</div></div>
+    <div class="hbox"><div class="hlabel">position</div><div class="hval" id="hPos">P6</div></div>
+    <div class="hbox"><div class="hlabel">progress</div><div class="hval" id="hProg">0%</div></div>
+    <div class="hbox"><div class="hlabel">speed</div><div class="hval" id="hSpd">0</div></div>
+  </div>
+  <div id="overlay">
+    <div id="card">
+      <h1>MOUNTAIN DASH</h1>
+      <div class="sub">altitude racing championship</div>
+      <div class="rules">
+        <span>↑ W</span> Accelerate &nbsp;|&nbsp; <span>↓ S</span> Brake<br>
+        <span>← →  A D</span> Change lanes<br><br>
+        <span>HIT a rival</span> → they explode, you restart<br>
+        <span>Timer keeps running</span> — no resets!<br>
+        Rivals <span>weave &amp; dodge</span> — stay sharp<br>
+        Reach the <span>finish line</span> before time runs out
+      </div>
+      <button id="startBtn" onclick="startGame()">START RACE</button>
+    </div>
+  </div>
+</div>
+<div id="controls">ARROW KEYS or <span>W A S D</span> to drive</div>
+
+<script>
+const cv = document.getElementById('c');
+const cx = cv.getContext('2d');
+const W=700, H=560;
+const TRACK=5000, TIME_LIMIT=60;
+const NLANES=6, LANE_W=66, ROAD_W=NLANES*LANE_W;
+const ROAD_X=(W-ROAD_W)/2;
+
+let state='idle', keys={}, timer=TIME_LIMIT, raf=null;
+let lastTs=0, explosions=[], debris=[], rumble=0;
+let cloudObjs=[], mountainObjs=[];
+
+// ── Player ──────────────────────────────────────────────
+const P={
+  lane:2, x:0, y:H*0.72, prog:0,
+  speed:0, maxSpd:9.0, acc:0.32, fric:0.86,
+  lx:0, lspd:0, lmax:3.8,
+  alive:true, finished:false, penalty:0,
+  reset(){ this.prog=0;this.speed=0;this.lspd=0;this.lane=2;
+    this.x=ROAD_X+this.lane*LANE_W+LANE_W/2;this.alive=true;this.finished=false; }
+};
+
+// ── AI Cars ─────────────────────────────────────────────
+const COLS=['#ef4444','#f97316','#a855f7','#eab308','#3b82f6'];
+const NAMES=['VIPER','BLAZE','PHANTOM','STORM','ARCTIC'];
+let AI=[];
+function makeAI(i){
+  return {
+    col:COLS[i], name:NAMES[i], lane:0, x:0,
+    prog:0, speed:0,
+    baseSpd: 6.0+Math.random()*2.0,
+    alive:true, finished:false,
+    // Lane-change AI state
+    targetLane:0, changeCooldown:0,
+    weavePhase:Math.random()*Math.PI*2,
+    weaveAmp:14+Math.random()*18,
+    weaveFreq:0.012+Math.random()*0.018,
+    aggression:0.5+Math.random()*0.5,
+    // Intentional swerve toward player
+    huntCooldown:0
+  };
+}
+function resetAI(){
+  AI=COLS.map((_,i)=>makeAI(i));
+  const slots=[0,1,2,3,4,5].sort(()=>Math.random()-0.5);
+  P.lane=slots[0]; P.x=laneCenter(P.lane);
+  AI.forEach((a,i)=>{a.lane=slots[i+1];a.targetLane=a.lane;a.x=laneCenter(a.lane);});
+}
+const laneCenter=l=>ROAD_X+l*LANE_W+LANE_W/2;
+const worldToScreen=(wy,cam)=>H*0.68-(wy-cam);
+
+// ── Background ──────────────────────────────────────────
+function makeClouds(){
+  cloudObjs=Array.from({length:14},(_,i)=>({
+    x:Math.random()*W, y:20+Math.random()*90,
+    w:55+Math.random()*90, h:18+Math.random()*24,
+    spd:0.15+Math.random()*0.35
+  }));
+}
+function makeMountains(){
+  mountainObjs=[];
+  const cols=[['#6b8fa8','#8baac4','#a8c4d8'],['#7a9eb5','#9ab5c8','#b8ceda']];
+  for(let i=0;i<10;i++){
+    const side=i%2;
+    mountainObjs.push({
+      x:side<1?(30+Math.random()*180):(W-30-Math.random()*180),
+      peak:50+Math.random()*110, w:110+Math.random()*140,
+      col:cols[Math.floor(Math.random()*cols.length)][Math.floor(Math.random()*3)],
+      snow:Math.random()>0.4
+    });
+  }
+  mountainObjs.sort((a,b)=>b.peak-a.peak);
+}
+
+// ── Drawing ─────────────────────────────────────────────
+function drawSky(){
+  const g=cx.createLinearGradient(0,0,0,H*0.56);
+  g.addColorStop(0,'#3a7bd5'); g.addColorStop(0.5,'#6aaee8'); g.addColorStop(1,'#c5e8f7');
+  cx.fillStyle=g; cx.fillRect(0,0,W,H*0.56);
+}
+function drawSun(){
+  cx.save();
+  const sx=W-90,sy=60;
+  const glow=cx.createRadialGradient(sx,sy,10,sx,sy,70);
+  glow.addColorStop(0,'rgba(255,240,100,0.5)'); glow.addColorStop(1,'rgba(255,240,100,0)');
+  cx.fillStyle=glow; cx.fillRect(sx-70,sy-70,140,140);
+  cx.fillStyle='#ffe066'; cx.beginPath(); cx.arc(sx,sy,26,0,Math.PI*2); cx.fill();
+  cx.strokeStyle='rgba(255,228,80,0.35)'; cx.lineWidth=9;
+  cx.beginPath(); cx.arc(sx,sy,40,0,Math.PI*2); cx.stroke();
+  cx.restore();
+}
+function drawMountains(){
+  mountainObjs.forEach(m=>{
+    cx.fillStyle=m.col;
+    cx.beginPath();
+    cx.moveTo(m.x-m.w/2,H*0.56); cx.lineTo(m.x,m.peak); cx.lineTo(m.x+m.w/2,H*0.56);
+    cx.fill();
+    if(m.snow){
+      cx.fillStyle='rgba(255,255,255,0.82)';
+      cx.beginPath();
+      cx.moveTo(m.x-22,m.peak+36); cx.lineTo(m.x,m.peak); cx.lineTo(m.x+22,m.peak+36);
+      cx.fill();
+    }
+  });
+}
+function drawClouds(){
+  cx.fillStyle='rgba(255,255,255,0.88)';
+  cloudObjs.forEach(c=>{
+    cx.beginPath(); cx.ellipse(c.x,c.y,c.w/2,c.h/2,0,0,Math.PI*2); cx.fill();
+    cx.beginPath(); cx.ellipse(c.x-c.w*0.28,c.y+5,c.w*0.3,c.h*0.45,0,0,Math.PI*2); cx.fill();
+    cx.beginPath(); cx.ellipse(c.x+c.w*0.28,c.y+5,c.w*0.3,c.h*0.45,0,0,Math.PI*2); cx.fill();
+  });
+}
+
+function drawGround(){
+  const horizon=H*0.56;
+  const gg=cx.createLinearGradient(0,horizon,0,H);
+  gg.addColorStop(0,'#4a7c35'); gg.addColorStop(0.4,'#3d6b25'); gg.addColorStop(1,'#2d5018');
+  cx.fillStyle=gg; cx.fillRect(0,horizon,W,H-horizon);
+  // grass texture strips
+  for(let i=0;i<8;i++){
+    cx.fillStyle=`rgba(0,0,0,0.04)`;
+    cx.fillRect(0,horizon+i*(H-horizon)/8,W,2);
+  }
+}
+
+function drawRoad(cam){
+  const horizon=H*0.56;
+  // Road surface
+  cx.fillStyle='#4a4a4a'; cx.fillRect(ROAD_X,horizon,ROAD_W,H-horizon);
+  // Road shading for depth
+  const rg=cx.createLinearGradient(ROAD_X,0,ROAD_X+ROAD_W,0);
+  rg.addColorStop(0,'rgba(0,0,0,0.18)'); rg.addColorStop(0.5,'rgba(0,0,0,0)'); rg.addColorStop(1,'rgba(0,0,0,0.18)');
+  cx.fillStyle=rg; cx.fillRect(ROAD_X,horizon,ROAD_W,H-horizon);
+
+  // Dashed lane lines
+  const segH=55;
+  const start=Math.floor(cam/segH);
+  for(let s=start-1;s<start+22;s++){
+    const sy=worldToScreen(s*segH,cam);
+    if(sy<horizon||sy>H+segH) continue;
+    cx.fillStyle=s%2===0?'rgba(255,255,255,0.22)':'rgba(255,255,255,0)';
+    for(let l=1;l<NLANES;l++){
+      cx.fillRect(ROAD_X+l*LANE_W-1,sy-segH*0.65,2,segH*0.6);
+    }
+  }
+  // Edge lines
+  cx.fillStyle='#fff'; cx.fillRect(ROAD_X,horizon,3,H-horizon);
+  cx.fillStyle='#fff'; cx.fillRect(ROAD_X+ROAD_W-3,horizon,3,H-horizon);
+
+  // Finish line
+  const fy=worldToScreen(TRACK,cam);
+  if(fy>horizon-10&&fy<H+10){
+    const sqW=14;
+    for(let i=0;i<Math.ceil(ROAD_W/sqW);i++){
+      for(let j=0;j<3;j++){
+        cx.fillStyle=(i+j)%2===0?'#fff':'#111';
+        cx.fillRect(ROAD_X+i*sqW,fy-j*sqW,sqW,sqW);
+      }
+    }
+    cx.save();
+    cx.fillStyle='rgba(255,255,0,0.9)';
+    cx.font='bold 16px Orbitron,monospace';
+    cx.textAlign='center';
+    cx.fillText('FINISH', W/2, fy-44);
+    cx.restore();
+  }
+
+  // Rumble strips
+  if(rumble>0){
+    cx.save(); cx.globalAlpha=Math.min(rumble*0.5,0.4);
+    cx.fillStyle='#ef4444';
+    cx.fillRect(ROAD_X,horizon,8,H-horizon);
+    cx.fillRect(ROAD_X+ROAD_W-8,horizon,8,H-horizon);
+    cx.restore();
+  }
+}
+
+function drawCar(x,y,col,isPlayer,spd,lane){
+  cx.save(); cx.translate(x,y);
+  const w=22,h=42;
+  // Shadow
+  cx.fillStyle='rgba(0,0,0,0.25)'; cx.beginPath(); cx.ellipse(3,h/2+4,14,6,0,0,Math.PI*2); cx.fill();
+  // Body
+  cx.fillStyle=isPlayer?'#22c55e':col;
+  cx.beginPath(); cx.roundRect(-w/2,-h/2,w,h,6); cx.fill();
+  // Roof
+  cx.fillStyle=isPlayer?'#16a34a':darken(col,40);
+  cx.beginPath(); cx.roundRect(-w/2+4,-h/2+7,w-8,h*0.44,4); cx.fill();
+  // Windscreen
+  cx.fillStyle='rgba(180,220,255,0.7)';
+  cx.beginPath(); cx.roundRect(-w/2+6,-h/2+8,w-12,h*0.16,2); cx.fill();
+  // Rear window
+  cx.fillStyle='rgba(180,220,255,0.5)';
+  cx.beginPath(); cx.roundRect(-w/2+5,h/2-18,w-10,8,2); cx.fill();
+  // Tyres
+  cx.fillStyle='#1a1a1a';
+  [[-w/2+1,-h/2+2],[w/2-7,-h/2+2],[-w/2+1,h/2-12],[w/2-7,h/2-12]].forEach(([tx,ty])=>{
+    cx.fillRect(tx,ty,6,10);
+  });
+  // Headlights
+  cx.fillStyle='#fefce8';
+  cx.beginPath(); cx.arc(-w/2+5,-h/2+3,3,0,Math.PI*2); cx.fill();
+  cx.beginPath(); cx.arc(w/2-5,-h/2+3,3,0,Math.PI*2); cx.fill();
+  // Speed lines for fast cars
+  if(spd>3){
+    cx.strokeStyle='rgba(255,255,255,0.18)'; cx.lineWidth=1.5;
+    for(let i=0;i<3;i++){
+      cx.beginPath(); cx.moveTo(-w/2+4+i*6,h/2+4); cx.lineTo(-w/2+2+i*6,h/2+14+i*3); cx.stroke();
+    }
+  }
+  if(isPlayer){
+    cx.fillStyle='#86efac'; cx.beginPath(); cx.roundRect(-3,-h/2-7,6,7,2); cx.fill();
+  }
+  cx.restore();
+}
+
+function darken(hex,amt){
+  try{
+    const r=parseInt(hex.slice(1,3),16), g=parseInt(hex.slice(3,5),16), b=parseInt(hex.slice(5,7),16);
+    return `rgb(${Math.max(0,r-amt)},${Math.max(0,g-amt)},${Math.max(0,b-amt)})`;
+  }catch(e){return hex;}
+}
+
+function drawExplosions(){
+  explosions.forEach(e=>{
+    cx.save(); cx.globalAlpha=e.life;
+    const g=cx.createRadialGradient(e.x,e.y,0,e.x,e.y,e.r);
+    g.addColorStop(0,'rgba(255,255,180,0.9)'); g.addColorStop(0.4,e.col); g.addColorStop(1,'rgba(0,0,0,0)');
+    cx.fillStyle=g; cx.beginPath(); cx.arc(e.x,e.y,e.r,0,Math.PI*2); cx.fill();
+    cx.restore();
+  });
+  debris.forEach(d=>{
+    cx.save(); cx.globalAlpha=d.life;
+    cx.fillStyle=d.col;
+    cx.translate(d.x,d.y); cx.rotate(d.rot);
+    cx.fillRect(-d.size/2,-d.size/2,d.size,d.size);
+    cx.restore();
+  });
+}
+
+function spawnExplosion(x,y,col){
+  for(let i=0;i<12;i++){
+    const a=Math.random()*Math.PI*2, spd=1.5+Math.random()*5;
+    explosions.push({x,y,vx:Math.cos(a)*spd,vy:Math.sin(a)*spd,life:1,r:8+Math.random()*18,col});
+  }
+  for(let i=0;i<20;i++){
+    const a=Math.random()*Math.PI*2, spd=2+Math.random()*6;
+    debris.push({x,y,vx:Math.cos(a)*spd,vy:Math.sin(a)*spd,life:1,size:3+Math.random()*6,rot:Math.random()*Math.PI*2,rotSpd:(Math.random()-0.5)*0.3,col:['#ef4444','#f97316','#fbbf24','#222'][Math.floor(Math.random()*4)]});
+  }
+}
+
+function drawMinimap(cam){
+  const mx=W-82,my=H-128,mw=68,mh=112;
+  cx.fillStyle='rgba(5,10,25,0.7)'; cx.beginPath(); cx.roundRect(mx,my,mw,mh,8); cx.fill();
+  cx.strokeStyle='rgba(34,197,94,0.3)'; cx.lineWidth=1; cx.beginPath(); cx.roundRect(mx,my,mw,mh,8); cx.stroke();
+  cx.fillStyle='rgba(255,255,255,0.08)'; cx.fillRect(mx+10,my+4,mw-20,mh-8);
+  // Finish
+  cx.fillStyle='rgba(255,255,0,0.6)'; cx.fillRect(mx+10,my+4,mw-20,3);
+  const toMY=prog=>(my+4+(1-prog/TRACK)*( mh-12));
+  AI.forEach(a=>{ if(!a.alive) return; cx.fillStyle=a.col; cx.fillRect(mx+10+(a.x-ROAD_X)/ROAD_W*(mw-20)-3,toMY(a.prog)-3,6,5); });
+  if(P.alive){ cx.fillStyle='#22c55e'; cx.fillRect(mx+10+(P.x-ROAD_X)/ROAD_W*(mw-20)-3,toMY(P.prog)-3,6,5); }
+  cx.fillStyle='rgba(255,255,255,0.5)'; cx.font='8px Share Tech Mono,monospace'; cx.textAlign='center';
+  cx.fillText('MAP',mx+mw/2,my+mh+10);
+}
+
+// ── AI Brain ─────────────────────────────────────────────
+function updateAI(dt){
+  const cam=P.prog;
+  AI.forEach(a=>{
+    if(!a.alive||a.finished) return;
+    a.weavePhase+=a.weaveFreq*dt*60;
+    a.changeCooldown=Math.max(0,a.changeCooldown-dt);
+    a.huntCooldown=Math.max(0,a.huntCooldown-dt);
+
+    // Speed: surges and slowdowns
+    const targetSpd=a.baseSpd*(0.85+0.3*Math.sin(a.weavePhase*0.3));
+    a.speed+=(targetSpd-a.speed)*0.03;
+    a.prog+=a.speed*dt*60*0.18;
+    if(a.prog>=TRACK){a.finished=true; return;}
+
+    // --- Aggressive lane changes ---
+    if(a.changeCooldown<=0){
+      const psy=worldToScreen(P.prog,cam);
+      const asy=worldToScreen(a.prog,cam);
+      const dyToPlayer=Math.abs(asy-psy);
+      const dxToPlayer=Math.abs(a.x-P.x);
+
+      // Hunt player if nearby and alive and aggressive
+      const nearPlayer=dyToPlayer<120&&dxToPlayer>20&&a.huntCooldown<=0;
+      if(nearPlayer&&Math.random()<a.aggression*0.4){
+        // Swerve toward player's lane
+        const dir=P.x>a.x?1:-1;
+        const newLane=Math.max(0,Math.min(NLANES-1,a.lane+dir));
+        if(newLane!==a.lane){
+          a.targetLane=newLane; a.lane=newLane;
+          a.changeCooldown=0.6+Math.random()*0.8;
+          a.huntCooldown=1.5;
+        }
+      } else if(Math.random()<0.008*dt*60){
+        // Random weave
+        const dir=Math.random()<0.5?-1:1;
+        const newLane=Math.max(0,Math.min(NLANES-1,a.lane+dir));
+        a.targetLane=newLane; a.lane=newLane;
+        a.changeCooldown=0.4+Math.random()*1.2;
+      }
+    }
+
+    // Smooth move toward target lane center with sinusoidal weave overlay
+    const target=laneCenter(a.targetLane)+Math.sin(a.weavePhase)*a.weaveAmp;
+    a.x+=(target-a.x)*0.06*dt*3;
+    a.x=Math.max(ROAD_X+11,Math.min(ROAD_X+ROAD_W-11,a.x));
+  });
+}
+
+// ── Collision ────────────────────────────────────────────
+function checkCollisions(){
+  if(!P.alive) return;
+  const cam=P.prog;
+  const py=P.y;
+  AI.forEach(a=>{
+    if(!a.alive) return;
+    const asy=worldToScreen(a.prog,cam);
+    const dx=Math.abs(P.x-a.x), dy=Math.abs(asy-py);
+    if(dx<26&&dy<40){
+      spawnExplosion(a.x,asy,a.col);
+      a.alive=false;
+      P.alive=false;
+      rumble=1;
+      setTimeout(()=>{
+        P.prog=0; P.speed=0; P.lspd=0;
+        P.x=laneCenter(P.lane); P.alive=true;
+      },900);
+    }
+  });
+}
+
+// ── Game Loop ─────────────────────────────────────────────
+function loop(ts){
+  if(state!=='racing') return;
+  const dt=Math.min((ts-lastTs)/1000,0.05);
+  lastTs=ts;
+  timer-=dt;
+  rumble=Math.max(0,rumble-dt*4);
+
+  cx.clearRect(0,0,W,H);
+  drawSky(); drawSun(); drawMountains(); drawClouds();
+  cloudObjs.forEach(c=>{c.x+=c.spd*dt*60; if(c.x>W+80)c.x=-100;});
+  drawGround();
+
+  const cam=P.prog;
+  drawRoad(cam);
+  updateAI(dt);
+
+  // Draw AI behind player
+  const horizon=H*0.56;
+  AI.forEach(a=>{
+    if(!a.alive) return;
+    const sy=worldToScreen(a.prog,cam);
+    if(sy>horizon&&sy<H+50) drawCar(a.x,sy,a.col,false,a.speed,a.lane);
+  });
+
+  // Player input
+  if(P.alive){
+    if(keys['ArrowUp']||keys['KeyW']) P.speed=Math.min(P.maxSpd, P.speed+P.acc*dt*60);
+    else P.speed*=Math.pow(P.fric,dt*60);
+    if(keys['ArrowDown']||keys['KeyS']) P.speed=Math.max(0,P.speed-P.acc*1.5*dt*60);
+    if(keys['ArrowLeft']||keys['KeyA']) P.lspd=Math.max(-P.lmax, P.lspd-0.28*dt*60);
+    else if(keys['ArrowRight']||keys['KeyD']) P.lspd=Math.min(P.lmax, P.lspd+0.28*dt*60);
+    else P.lspd*=Math.pow(0.78,dt*60);
+    P.x+=P.lspd*dt*60;
+    P.x=Math.max(ROAD_X+12,Math.min(ROAD_X+ROAD_W-12,P.x));
+    P.prog+=P.speed*dt*60*0.18;
+    if(P.prog>=TRACK){P.finished=true; endGame('win'); return;}
+    checkCollisions();
+  }
+
+  if(P.alive) drawCar(P.x,P.y,'#22c55e',true,P.speed,P.lane);
+
+  // Particles
+  explosions.forEach(e=>{e.x+=e.vx*dt*60;e.y+=e.vy*dt*60;e.r+=0.5*dt*60;e.life-=0.04*dt*60;});
+  debris.forEach(d=>{d.x+=d.vx*dt*60;d.y+=d.vy*dt*60;d.vy+=0.2*dt*60;d.rot+=d.rotSpd*dt*60;d.life-=0.025*dt*60;});
+  explosions=explosions.filter(e=>e.life>0);
+  debris=debris.filter(d=>d.life>0);
+  drawExplosions();
+  drawMinimap(cam);
+  updateHUD();
+
+  if(timer<=0){endGame('timeout'); return;}
+  raf=requestAnimationFrame(loop);
+}
+
+function updateHUD(){
+  const t=Math.max(0,timer);
+  const el=document.getElementById('hTime');
+  el.textContent=t.toFixed(1);
+  el.className='hval'+(t<10?' danger':t<20?' warn':'');
+  const prog=Math.min(100,Math.round(P.prog/TRACK*100));
+  document.getElementById('hProg').textContent=prog+'%';
+  let rank=1; AI.forEach(a=>{if(a.prog>P.prog)rank++;});
+  const rs=['1ST','2ND','3RD','4TH','5TH','6TH'];
+  const re=document.getElementById('hPos');
+  re.textContent='P'+(rank);
+  re.className='hval'+(rank===1?' ':rank<=3?' warn':' danger');
+  document.getElementById('hSpd').textContent=Math.round(P.speed*36);
+}
+
+function endGame(result){
+  state='idle';
+  cancelAnimationFrame(raf);
+  const ov=document.getElementById('overlay');
+  ov.style.display='flex';
+  const elapsed=(TIME_LIMIT-timer).toFixed(1);
+  let rank=1; AI.forEach(a=>{if(a.prog>P.prog)rank++;});
+  const rsuf=rank===1?'ST':rank===2?'ND':rank===3?'RD':'TH';
+  if(result==='win'){
+    document.getElementById('card').innerHTML=`
+      <h1>${rank===1?'VICTORY!':'FINISHED'}</h1>
+      <div class="sub">${rank===1?'podium champion':'race complete'}</div>
+      <div class="rules">
+        You finished in <span>${rank}${rsuf} place</span><br>
+        Final time: <span>${elapsed}s</span><br><br>
+        ${rank===1?'<span>Perfect run!</span>':rank<=3?'<span>Podium finish!</span>':'Keep practicing!'}
+      </div>
+      <button class="startBtn" onclick="startGame()" style="background:transparent;border:1.5px solid #22c55e;color:#22c55e;font-family:Orbitron,sans-serif;font-size:13px;font-weight:700;letter-spacing:3px;padding:12px 36px;border-radius:8px;cursor:pointer;text-transform:uppercase;">RACE AGAIN</button>`;
+  } else {
+    document.getElementById('card').innerHTML=`
+      <h1>TIME UP!</h1>
+      <div class="sub">race over</div>
+      <div class="rules">You ran out of time!<br>Progress: <span>${Math.round(P.prog/TRACK*100)}%</span><br><br>Reach the finish in <span>60 seconds</span>!</div>
+      <button onclick="startGame()" style="background:transparent;border:1.5px solid #22c55e;color:#22c55e;font-family:Orbitron,sans-serif;font-size:13px;font-weight:700;letter-spacing:3px;padding:12px 36px;border-radius:8px;cursor:pointer;text-transform:uppercase;">TRY AGAIN</button>`;
+  }
+}
+
+window.startGame=function(){
+  document.getElementById('overlay').style.display='none';
+  timer=TIME_LIMIT; lastTs=performance.now();
+  P.reset(); resetAI(); explosions=[]; debris=[]; rumble=0;
+  state='racing';
+  cancelAnimationFrame(raf);
+  raf=requestAnimationFrame(loop);
+};
+
+document.addEventListener('keydown',e=>{
+  keys[e.code]=true;
+  if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
+});
+document.addEventListener('keyup',e=>keys[e.code]=false);
+
+makeClouds(); makeMountains();
+</script>
+</body>
+</html>
